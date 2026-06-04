@@ -1,0 +1,48 @@
+{
+  "wire": [
+    {
+      "name": "Проволока 1.6 мм",
+      "propane": 30.0,
+      "oxygen": 100.0,
+      "feeder_speed": 70.0
+    },
+    {
+      "name": "Проволока 2.0 мм",
+      "propane": 35.0,
+      "oxygen": 120.0,
+      "feeder_speed": 80.0
+    },
+    {
+      "name": "Проволока 2.4 мм",
+      "propane": 40.0,
+      "oxygen": 140.0,
+      "feeder_speed": 90.0
+    }
+  ],
+  "powder": [
+    {
+      "name": "Порошок NiCr",
+      "propane": 45.0,
+      "oxygen": 150.0,
+      "feeder_speed": 25.0
+    },
+    {
+      "name": "Порошок WC-Co",
+      "propane": 50.0,
+      "oxygen": 170.0,
+      "feeder_speed": 32.0
+    },
+    {
+      "name": "Порошок Cr₃C₂",
+      "propane": 55.0,
+      "oxygen": 190.0,
+      "feeder_speed": 38.0
+    },
+    {
+      "name": "Порошок 1",
+      "propane": 45.0,
+      "oxygen": 150.0,
+      "feeder_speed": 25.0
+    }
+  ]
+}

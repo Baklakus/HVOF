@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/Arrow_left.svg</file>
+        <file>icons/Home_light.svg</file>
+        <file>icons/On_button_light.svg</file>
+        <file>icons/Setting_line_light.svg</file>
+    </qresource>
+</RCC>
