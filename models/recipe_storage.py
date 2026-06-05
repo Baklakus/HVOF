@@ -1,16 +1,8 @@
 """
 models/recipe_storage.py
 
-Хранилище рецептов HMI HVoF.
-
-Этот файл относится к слою Model.
-Он отвечает только за:
-- загрузку recipes.json;
-- сохранение recipes.json;
-- хранение отдельных таблиц рецептов для проволоки и порошка;
-- обновление ячеек рецептов;
-- добавление новых рецептов.
-
+Хранилище рабочих режимов / рецептов HMI HVoF.
+Номер режима не хранится в JSON: его показывает QTableWidget через вертикальный заголовок.
 """
 
 import json
@@ -19,9 +11,9 @@ import os
 from utils.constants import (
     RECIPES_FILE,
     INSTALL_WIRE,
-    INSTALL_POWDER,
     INSTALL_TYPES,
     DEFAULT_RECIPES,
+    RECIPE_COLUMNS,
 )
 
 
@@ -39,27 +31,58 @@ class RecipeStorage:
         }
 
     @staticmethod
-    def _normalize_recipe(recipe: dict, number: int) -> dict:
+    def _string_value(recipe: dict, *keys: str, default: str = "") -> str:
+        for key in keys:
+            value = recipe.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return default
+
+    @staticmethod
+    def _float_value(recipe: dict, *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            value = recipe.get(key)
+            if value not in (None, ""):
+                return float(value)
+        return float(default)
+
+    @classmethod
+    def _normalize_recipe(cls, recipe: dict, index: int) -> dict:
+        """
+        Поддерживает старый формат:
+            name, propane, oxygen, feeder_speed
+
+        И новый формат ТЗ:
+            material, diameter, gas_ratio, propane, oxygen, air,
+            feeder_speed, pistol_speed
+        """
+        material = cls._string_value(
+            recipe,
+            "material",
+            "name",
+            default=f"Режим {index}",
+        )
+
+        propane = cls._float_value(recipe, "propane")
+        oxygen = cls._float_value(recipe, "oxygen")
+        air = cls._float_value(recipe, "air")
+
         return {
-            "name": str(recipe.get("name", f"Режим {number}")),
-            "propane": float(recipe.get("propane", 0.0)),
-            "oxygen": float(recipe.get("oxygen", 0.0)),
-            "feeder_speed": float(recipe.get("feeder_speed", 0.0)),
+            "material": material,
+            "diameter": cls._float_value(recipe, "diameter"),
+            "gas_ratio": cls._string_value(
+                recipe,
+                "gas_ratio",
+                default=f"{propane:g}/{oxygen:g}/{air:g}",
+            ),
+            "propane": propane,
+            "oxygen": oxygen,
+            "air": air,
+            "feeder_speed": cls._float_value(recipe, "feeder_speed", "feeder"),
+            "pistol_speed": cls._float_value(recipe, "pistol_speed", "pistol"),
         }
 
     def _normalize_storage(self, data) -> dict[str, list[dict]]:
-        """
-        Новый формат recipes.json:
-
-        {
-            "wire": [...],
-            "powder": [...]
-        }
-
-        Старый формат в виде общего списка больше не переносится.
-        Если найден старый список, он удаляется и заменяется новыми
-        раздельными рецептами для проволоки и порошка.
-        """
         defaults = self._copy_defaults()
 
         if isinstance(data, dict):
@@ -72,6 +95,7 @@ class RecipeStorage:
                     normalized[install] = [
                         self._normalize_recipe(recipe, i + 1)
                         for i, recipe in enumerate(rows)
+                        if isinstance(recipe, dict)
                     ]
 
             return normalized
@@ -79,10 +103,6 @@ class RecipeStorage:
         return defaults
 
     def load(self):
-        """
-        Загружает рецепты из recipes.json.
-        Если файла нет или он повреждён — создаёт таблицы по умолчанию.
-        """
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, "r", encoding="utf-8") as file:
@@ -95,18 +115,10 @@ class RecipeStorage:
         self.save()
 
     def save(self):
-        """
-        Сохраняет рецепты в recipes.json.
-        """
         with open(self.filepath, "w", encoding="utf-8") as file:
             json.dump(self.recipes, file, ensure_ascii=False, indent=2)
 
     def get_recipes(self, install: str) -> list[dict]:
-        """
-        Возвращает список рецептов для выбранной установки:
-        - wire
-        - powder
-        """
         if install not in INSTALL_TYPES:
             install = INSTALL_WIRE
 
@@ -116,67 +128,46 @@ class RecipeStorage:
         )
 
     def update_recipe(self, install: str, index: int, col: int, value):
-        """
-        Обновляет одну ячейку рецепта.
-
-        Теперь в таблице нет колонки number.
-
-        col:
-            0 -> name
-            1 -> propane
-            2 -> oxygen
-            3 -> feeder_speed
-        """
         rows = self.get_recipes(install)
 
-        col_map = {
-            0: "name",
-            1: "propane",
-            2: "oxygen",
-            3: "feeder_speed",
-        }
+        if not (0 <= index < len(rows)):
+            return
 
-        key = col_map.get(col)
+        if not (0 <= col < len(RECIPE_COLUMNS)):
+            return
 
-        if key and 0 <= index < len(rows):
-            if key in ("propane", "oxygen", "feeder_speed"):
-                value = float(value)
+        key = RECIPE_COLUMNS[col]
 
-            rows[index][key] = value
-            self.save()
+        if key in ("diameter", "propane", "oxygen", "air", "feeder_speed", "pistol_speed"):
+            value = float(value)
+        else:
+            value = str(value)
+
+        rows[index][key] = value
+        self.save()
 
     def add_recipe(self, install: str):
-        """
-        Добавляет новый рецепт в таблицу выбранной установки.
-        Возвращает индекс добавленной строки.
-        """
         rows = self.get_recipes(install)
-
-        next_number = max(
-            [int(recipe.get("number", 0)) for recipe in rows],
-            default=0,
-        ) + 1
-
-        prefix = "Проволока" if install == INSTALL_WIRE else "Порошок"
+        next_number = len(rows) + 1
         base = DEFAULT_RECIPES[install][0]
 
+        material_prefix = "Проволока" if install == INSTALL_WIRE else "Порошок"
+
         new_recipe = {
-            "number": next_number,
-            "name": f"{prefix} {next_number}",
-            "propane": base["propane"],
-            "oxygen": base["oxygen"],
-            "feeder_speed": base["feeder_speed"],
+            "material": f"{material_prefix} {next_number}",
+            "diameter": base.get("diameter", 0.0),
+            "gas_ratio": base.get("gas_ratio", ""),
+            "propane": base.get("propane", 0.0),
+            "oxygen": base.get("oxygen", 0.0),
+            "air": base.get("air", 0.0),
+            "feeder_speed": base.get("feeder_speed", 0.0),
+            "pistol_speed": base.get("pistol_speed", 0.0),
         }
 
         rows.append(new_recipe)
         self.save()
-
         return len(rows) - 1
 
     def reset_to_defaults(self):
-        """
-        Полностью сбрасывает рецепты к значениям по умолчанию.
-        Может пригодиться для отладки или кнопки сброса.
-        """
         self.recipes = self._copy_defaults()
         self.save()

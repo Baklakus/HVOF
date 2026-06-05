@@ -239,7 +239,7 @@ QLabel[text=&quot;Текущее значение&quot;] {
 QLabel[objectName$=&quot;WorkWalue&quot;], QLabel[objectName$=&quot;WorkValue&quot;],
 QLabel[objectName$=&quot;CurrentWalue&quot;], QLabel[objectName$=&quot;CurrentValue&quot;] {
     font-family: 'Roboto', 'Arial', sans-serif;
-    font-size: 36px;
+    font-size: 24px;
     font-weight: 400;
 }
 QLabel[objectName$=&quot;WorkWalue&quot;], QLabel[objectName$=&quot;WorkValue&quot;] {
@@ -465,7 +465,7 @@ QPushButton#btnRecipeSelect:pressed { background-color: #15803D; }</string>
           <string/>
          </property>
          <property name="icon">
-          <iconset resource="resources.qrc">
+          <iconset resource="res/resources.qrc">
            <normaloff>:/icons/On_button_light.svg</normaloff>:/icons/On_button_light.svg</iconset>
          </property>
          <property name="iconSize">
@@ -488,7 +488,7 @@ QPushButton#btnRecipeSelect:pressed { background-color: #15803D; }</string>
           <string/>
          </property>
          <property name="icon">
-          <iconset resource="resources.qrc">
+          <iconset resource="res/resources.qrc">
            <normaloff>:/icons/Arrow_left.svg</normaloff>:/icons/Arrow_left.svg</iconset>
          </property>
          <property name="iconSize">
@@ -514,7 +514,7 @@ QPushButton#btnRecipeSelect:pressed { background-color: #15803D; }</string>
           <string/>
          </property>
          <property name="icon">
-          <iconset resource="resources.qrc">
+          <iconset resource="res/resources.qrc">
            <normaloff>:/icons/Setting_line_light.svg</normaloff>:/icons/Setting_line_light.svg</iconset>
          </property>
          <property name="iconSize">
@@ -576,7 +576,7 @@ QPushButton#btnRecipeSelect:pressed { background-color: #15803D; }</string>
           <string/>
          </property>
          <property name="icon">
-          <iconset resource="resources.qrc">
+          <iconset resource="res/resources.qrc">
            <normaloff>:/icons/Home_light.svg</normaloff>:/icons/Home_light.svg</iconset>
          </property>
          <property name="iconSize">
@@ -596,7 +596,7 @@ QPushButton#btnRecipeSelect:pressed { background-color: #15803D; }</string>
        <bool>true</bool>
       </property>
       <property name="currentIndex">
-       <number>2</number>
+       <number>1</number>
       </property>
       <widget class="QWidget" name="page">
        <layout class="QVBoxLayout" name="verticalLayout_2">
@@ -2265,7 +2265,7 @@ QPushButton#btnAddRecipe:pressed {
   </widget>
  </widget>
  <resources>
-  <include location="resources.qrc"/>
+  <include location="res/resources.qrc"/>
  </resources>
  <connections/>
 </ui>

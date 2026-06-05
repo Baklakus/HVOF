@@ -1,0 +1,20 @@
+{
+  "wire": {
+    "propane": 25.0,
+    "oxygen": 80.0,
+    "air": 180.0,
+    "feeder": 30.0,
+    "pistol": 30.0,
+    "ignition_delay": 1.0,
+    "feeding_delay": 2.0
+  },
+  "powder": {
+    "propane": 35.0,
+    "oxygen": 120.0,
+    "air": 240.0,
+    "feeder": 10.0,
+    "pistol": 41.0,
+    "ignition_delay": 1.0,
+    "feeding_delay": 2.5
+  }
+}

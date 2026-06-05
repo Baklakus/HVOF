@@ -1,48 +1,76 @@
 {
   "wire": [
     {
-      "name": "Проволока 1.6 мм",
+      "material": "Проволока 1.6 мм",
+      "diameter": 0.0,
+      "gas_ratio": "30/100/0",
       "propane": 30.0,
       "oxygen": 100.0,
-      "feeder_speed": 70.0
+      "air": 0.0,
+      "feeder_speed": 70.0,
+      "pistol_speed": 0.0
     },
     {
-      "name": "Проволока 2.0 мм",
+      "material": "Проволока 2.0 мм",
+      "diameter": 0.0,
+      "gas_ratio": "35/120/0",
       "propane": 35.0,
       "oxygen": 120.0,
-      "feeder_speed": 80.0
+      "air": 0.0,
+      "feeder_speed": 80.0,
+      "pistol_speed": 0.0
     },
     {
-      "name": "Проволока 2.4 мм",
+      "material": "Проволока 2.4 мм",
+      "diameter": 0.0,
+      "gas_ratio": "40/140/0",
       "propane": 40.0,
       "oxygen": 140.0,
-      "feeder_speed": 90.0
+      "air": 0.0,
+      "feeder_speed": 90.0,
+      "pistol_speed": 0.0
     }
   ],
   "powder": [
     {
-      "name": "Порошок NiCr",
+      "material": "Порошок NiCr",
+      "diameter": 0.0,
+      "gas_ratio": "45/150/0",
       "propane": 45.0,
       "oxygen": 150.0,
-      "feeder_speed": 25.0
+      "air": 0.0,
+      "feeder_speed": 25.0,
+      "pistol_speed": 0.0
     },
     {
-      "name": "Порошок WC-Co",
+      "material": "Порошок WC-Co",
+      "diameter": 0.0,
+      "gas_ratio": "50/170/0",
       "propane": 50.0,
       "oxygen": 170.0,
-      "feeder_speed": 32.0
+      "air": 0.0,
+      "feeder_speed": 32.0,
+      "pistol_speed": 0.0
     },
     {
-      "name": "Порошок Cr₃C₂",
+      "material": "Порошок Cr₃C₂",
+      "diameter": 0.0,
+      "gas_ratio": "55/190/0",
       "propane": 55.0,
       "oxygen": 190.0,
-      "feeder_speed": 38.0
+      "air": 0.0,
+      "feeder_speed": 38.0,
+      "pistol_speed": 0.0
     },
     {
-      "name": "Порошок 1",
+      "material": "Порошок 1",
+      "diameter": 0.0,
+      "gas_ratio": "45/150/0",
       "propane": 45.0,
       "oxygen": 150.0,
-      "feeder_speed": 25.0
+      "air": 0.0,
+      "feeder_speed": 25.0,
+      "pistol_speed": 0.0
     }
   ]
 }
