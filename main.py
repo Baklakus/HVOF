@@ -8,10 +8,7 @@ import sys
 
 from PyQt6 import QtWidgets, QtCore
 
-try:
-    import resources_rc  # noqa: F401
-except ImportError:
-    pass
+import resources_rc
 
 from models.hvof_data_manager import HvofDataManager
 from models.recipe_storage import RecipeStorage
