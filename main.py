@@ -2,15 +2,6 @@
 main.py
 
 Точка входа приложения HMI HVoF.
-
-После разделения большого main.py этот файл должен только:
-- создать QApplication;
-- создать Model / DataManager;
-- создать ViewModel;
-- создать View;
-- соединить сигналы между слоями;
-- запустить UART-поток;
-- показать главное окно.
 """
 
 import sys
@@ -24,9 +15,11 @@ except ImportError:
 
 from models.hvof_data_manager import HvofDataManager
 from models.recipe_storage import RecipeStorage
+from models.startup_params_storage import StartupParamsStorage
 
 from viewmodels.main_view_model import MainViewModel
 from viewmodels.recipe_view_model import RecipeViewModel
+from viewmodels.startup_params_view_model import StartupParamsViewModel
 
 from views.main_window import MainWindow
 
@@ -40,6 +33,7 @@ def main():
 
     data_manager = HvofDataManager()
     recipe_storage = RecipeStorage()
+    startup_storage = StartupParamsStorage()
 
     # ─────────────────────────────────────────────────────────────
     # ViewModel
@@ -47,6 +41,7 @@ def main():
 
     main_vm = MainViewModel()
     recipe_vm = RecipeViewModel(recipe_storage)
+    startup_vm = StartupParamsViewModel(startup_storage)
 
     # ─────────────────────────────────────────────────────────────
     # UART-поток
@@ -58,30 +53,47 @@ def main():
     uart_thread.started.connect(data_manager.open_port)
 
     # ─────────────────────────────────────────────────────────────
-    # Связь ViewModel -> DataManager
+    # MainViewModel -> DataManager
     # ─────────────────────────────────────────────────────────────
 
     main_vm.requestPacketSend.connect(data_manager.send_setpoint_packet)
     main_vm.requestCommandSend.connect(data_manager.send_command_packet)
 
     # ─────────────────────────────────────────────────────────────
-    # Связь DataManager -> ViewModel
+    # DataManager -> MainViewModel
     # ─────────────────────────────────────────────────────────────
 
     data_manager.currentValueChanged.connect(main_vm.update_current_value)
+
+    if hasattr(data_manager, "errorStateChanged"):
+        data_manager.errorStateChanged.connect(main_vm.update_error_state)
+
+    if hasattr(data_manager, "linkStateChanged"):
+        data_manager.linkStateChanged.connect(main_vm.update_link_state)
+
     data_manager.logMessage.connect(lambda message: print(message, flush=True))
 
     # ─────────────────────────────────────────────────────────────
-    # Связь RecipeViewModel -> MainViewModel
+    # RecipeViewModel -> MainViewModel
     # ─────────────────────────────────────────────────────────────
 
     recipe_vm.modeApplied.connect(main_vm.apply_recipe)
 
     # ─────────────────────────────────────────────────────────────
+    # StartupParamsViewModel -> MainViewModel
+    # ─────────────────────────────────────────────────────────────
+
+    main_vm.installationChanged.connect(startup_vm.set_installation)
+    startup_vm.paramsChanged.connect(main_vm.set_startup_params)
+
+    # Первичная загрузка параметров запуска.
+    startup_vm.load_params()
+
+    # ─────────────────────────────────────────────────────────────
     # View
     # ─────────────────────────────────────────────────────────────
 
-    window = MainWindow(main_vm, recipe_vm)
+    window = MainWindow(main_vm, recipe_vm, startup_vm)
     window.show()
 
     # Запускаем UART после создания всех связей.
@@ -92,10 +104,6 @@ def main():
     # ─────────────────────────────────────────────────────────────
 
     exit_code = app.exec()
-
-    # ─────────────────────────────────────────────────────────────
-    # Корректное завершение UART-потока
-    # ─────────────────────────────────────────────────────────────
 
     if uart_thread.isRunning():
         QtCore.QMetaObject.invokeMethod(

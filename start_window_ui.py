@@ -233,7 +233,7 @@ class Ui_MainWindow(object):
 "QLabel[objectName$=\"WorkWalue\"], QLabel[objectName$=\"WorkValue\"],\n"
 "QLabel[objectName$=\"CurrentWalue\"], QLabel[objectName$=\"CurrentValue\"] {\n"
 "    font-family: \'Roboto\', \'Arial\', sans-serif;\n"
-"    font-size: 36px;\n"
+"    font-size: 24px;\n"
 "    font-weight: 400;\n"
 "}\n"
 "QLabel[objectName$=\"WorkWalue\"], QLabel[objectName$=\"WorkValue\"] {\n"
@@ -1204,7 +1204,7 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.centralwidget)
 
         self.retranslateUi(MainWindow)
-        self.stackedWidget.setCurrentIndex(2)
+        self.stackedWidget.setCurrentIndex(1)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
     def retranslateUi(self, MainWindow):

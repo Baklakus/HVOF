@@ -154,12 +154,9 @@ class RecipeViewModel(QObject):
             индекс строки
 
         col:
-            индекс колонки в QTableWidget:
-            0 -> number, не редактируется
-            1 -> name
-            2 -> propane
-            3 -> oxygen
-            4 -> feeder_speed
+            индекс колонки в QTableWidget.
+            Номер режима не редактируется и хранится в вертикальном заголовке Qt.
+            Соответствие колонок задаётся в utils.constants.RECIPE_COLUMNS.
 
         value:
             новое значение

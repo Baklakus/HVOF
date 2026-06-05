@@ -15,12 +15,15 @@ UART, рецепты и бизнес-логика здесь не хранятс
 
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import pyqtSlot
-
+from views.startup_params_dialog import StartupParamsDialog
 from start_window_ui import Ui_MainWindow
 
 from utils.constants import (
     INSTALL_WIRE,
     INSTALL_POWDER,
+    RECIPE_COLUMNS,
+    RECIPE_HEADERS,
+    RECIPE_NUMERIC_COLUMNS,
 )
 
 from views.numeric_keyboard import NumericKeyboard
@@ -28,19 +31,22 @@ from views.text_keyboard import TextKeyboard
 
 
 class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
-    def __init__(self, vm, recipe_vm):
+    def __init__(self, vm, recipe_vm, startup_vm):
         super().__init__()
 
         self.vm = vm
         self.recipe_vm = recipe_vm
+        self.startup_vm = startup_vm
 
         self.setupUi(self)
 
         self.stackedWidget.setCurrentIndex(0)
 
         self._patch_topbar_icons()
+        self._create_topbar_recipes_button()
         self._connect_all()
         self._setup_recipes_ui()
+        self._setup_parameter_keyboards()
 
     # ─────────────────────────────────────────────────────────────
     # Верхняя панель
@@ -60,6 +66,52 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if btn and (not btn.icon() or btn.icon().isNull()):
                 btn.setText(symbol)
 
+    def _create_topbar_recipes_button(self):
+        """
+        Создаёт отдельную кнопку перехода к рецептам в верхней панели.
+
+        btnTopSwitch визуально является кнопкой питания,
+        поэтому его нельзя использовать для рецептов.
+        """
+        if hasattr(self, "btnTopRecipes"):
+            return
+
+        self.btnTopRecipes = QtWidgets.QPushButton(parent=self.frameTopBar)
+        self.btnTopRecipes.setObjectName("btnTopRecipes")
+        self.btnTopRecipes.setText("Рецепты")
+        self.btnTopRecipes.setMinimumSize(QtCore.QSize(110, 44))
+        self.btnTopRecipes.setMaximumHeight(44)
+        self.btnTopRecipes.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btnTopRecipes.setStyleSheet(
+            """
+            QPushButton#btnTopRecipes {
+                background-color: #334155;
+                color: #FFFFFF;
+                border: 1px solid #475569;
+                border-radius: 8px;
+                font-family: 'Roboto', 'Arial', sans-serif;
+                font-size: 16px;
+                font-weight: 500;
+                padding: 6px 12px;
+            }
+
+            QPushButton#btnTopRecipes:hover {
+                background-color: #475569;
+            }
+
+            QPushButton#btnTopRecipes:pressed {
+                background-color: #1E2939;
+            }
+            """
+        )
+
+        # Вставляем кнопку рядом с кнопкой настроек.
+        index = self.horizontalLayout_18.indexOf(self.btnTopSettings)
+
+        if index >= 0:
+            self.horizontalLayout_18.insertWidget(index + 1, self.btnTopRecipes)
+        else:
+            self.horizontalLayout_18.addWidget(self.btnTopRecipes)
     # ─────────────────────────────────────────────────────────────
     # Подключение сигналов
     # ─────────────────────────────────────────────────────────────
@@ -69,7 +121,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.btnWire.clicked.connect(lambda: vm.select_installation(INSTALL_WIRE))
         self.btnPowder.clicked.connect(lambda: vm.select_installation(INSTALL_POWDER))
-        self.btnExit.clicked.connect(QtWidgets.QApplication.instance().quit)
+        self.btnExit.clicked.connect(self.request_close)
 
         if hasattr(self, "btnTopBack"):
             self.btnTopBack.clicked.connect(vm.go_back)
@@ -78,15 +130,18 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.btnTopHome.clicked.connect(vm.go_back)
 
         if hasattr(self, "btnTopSwitch"):
-            self.btnTopSwitch.clicked.connect(
+            # btnTopSwitch — это кнопка питания
+            self.btnTopSwitch.clicked.connect(self.request_close)
+
+        if hasattr(self, "btnTopRecipes"):
+            # Отдельная кнопка рецептов
+            self.btnTopRecipes.clicked.connect(
                 lambda: self.stackedWidget.setCurrentIndex(2)
             )
 
         if hasattr(self, "btnTopSettings"):
-            self.btnTopSettings.clicked.connect(
-                lambda: self.stackedWidget.setCurrentIndex(2)
-            )
-
+            # Параметры запуска
+            self.btnTopSettings.clicked.connect(self._open_startup_params_dialog)
         self.btnStart.clicked.connect(lambda: vm.set_main_system_state(True))
         self.btnStop.clicked.connect(lambda: vm.set_main_system_state(False))
 
@@ -149,14 +204,58 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         vm.installationChanged.connect(self.recipe_vm.set_installation)
         vm.currentRecipeChanged.connect(self.lblCurrentMode.setText)
         vm.modeSwitchBlocked.connect(self._on_mode_switch_blocked)
+        vm.errorStateChanged.connect(self._on_error_state_changed)
+        vm.linkStateChanged.connect(self._on_link_state_changed)
 
+        self.startup_vm.set_installation(self.vm.current_install)
 
         if hasattr(self, "btnRecipesBack"):
             self.btnRecipesBack.clicked.connect(
                 lambda: self.stackedWidget.setCurrentIndex(1)
             )
 
-        self.recipe_vm.modeApplied.connect(self.vm.apply_recipe)
+        # Связь RecipeViewModel -> MainViewModel выполнена в main.py.
+
+    def _setup_parameter_keyboards(self):
+        """
+        Подключает экранную клавиатуру к рабочим значениям параметров.
+
+        Нажимаем на значение:
+            35.0 л/мин
+
+        Открывается NumericKeyboard.
+        После ввода число попадает в рабочее значение.
+        Отправка в МК выполняется только после нажатия SET.
+        """
+        label_map = {
+            "propane": self.lblPropaneWorkWalue,
+            "oxygen": self.lblOxygenWorkWalue,
+            "air": self.lblAirWorkWalue,
+            "feeder": self.lblQgas_FeederWorkWalue,
+            "pistol": self.lblPistol_PatatelWorkWalue,
+        }
+
+        for param, label in label_map.items():
+            label.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            label.setToolTip("Нажмите для ввода значения")
+
+            label.mousePressEvent = (
+                lambda event, p=param: self._open_parameter_keyboard(p)
+            )
+
+    def _open_parameter_keyboard(self, param: str):
+        """
+        Открывает числовую клавиатуру для выбранного параметра.
+        """
+        current_value = self.vm._disp_now().get(param, 0.0)
+
+        dlg = NumericKeyboard(self, current_value)
+
+        dlg.valueEntered.connect(
+            lambda value, p=param: self.vm.set_display_value(p, value)
+        )
+
+        dlg.exec()
 
     # ─────────────────────────────────────────────────────────────
     # Рецепты
@@ -215,52 +314,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         table.blockSignals(True)
         table.setRowCount(0)
-
-        # В таблице теперь 4 колонки:
-        # 0 — название
-        # 1 — пропан
-        # 2 — кислород
-        # 3 — подача
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(
-            [
-                "Название",
-                "Пропан",
-                "Кислород",
-                "Подача",
-            ]
-        )
+        table.setColumnCount(len(RECIPE_HEADERS))
+        table.setHorizontalHeaderLabels(list(RECIPE_HEADERS))
+        table.verticalHeader().setVisible(True)
 
         for row, recipe in enumerate(recipes):
             table.insertRow(row)
 
-            # Номер строки задаёт сам Qt через вертикальный заголовок
-            table.setVerticalHeaderItem(
-                row,
-                QtWidgets.QTableWidgetItem(str(row + 1)),
-            )
+            # Номер режима назначает сама Qt-таблица через вертикальный заголовок.
+            table.setVerticalHeaderItem(row, QtWidgets.QTableWidgetItem(str(row + 1)))
 
-            table.setItem(
-                row,
-                0,
-                QtWidgets.QTableWidgetItem(str(recipe.get("name", ""))),
-            )
-            table.setItem(
-                row,
-                1,
-                QtWidgets.QTableWidgetItem(str(recipe.get("propane", ""))),
-            )
-            table.setItem(
-                row,
-                2,
-                QtWidgets.QTableWidgetItem(str(recipe.get("oxygen", ""))),
-            )
-            table.setItem(
-                row,
-                3,
-                QtWidgets.QTableWidgetItem(str(recipe.get("feeder_speed", ""))),
-            )
+            for col, key in enumerate(RECIPE_COLUMNS):
+                table.setItem(row, col, QtWidgets.QTableWidgetItem(str(recipe.get(key, ""))))
 
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
         table.blockSignals(False)
 
         if 0 <= self.recipe_vm.current_index < table.rowCount():
@@ -278,12 +346,8 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
         item = self.tableRecipes.item(row, col)
         current = item.text() if item else ""
 
-        # После удаления колонки number:
-        # 0 — name
-        # 1 — propane
-        # 2 — oxygen
-        # 3 — feeder_speed
-        if col in (1, 2, 3):
+        # Номер режима не редактируется: он находится в вертикальном заголовке Qt.
+        if col in RECIPE_NUMERIC_COLUMNS:
             try:
                 num = float(current) if current else 0.0
             except ValueError:
@@ -322,7 +386,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.lblQgas_FeederWorkWalue.setText(f"{feeder:.1f} г/мин")
             self.lblQgas_FeederName.setText("Q газа")
             self.lblPistol_PatatelWorkWalue.setText(f"{pistol:.1f} об/мин")
-            self.lblPistol_PatatelName.setText("Питатель")
+            self.lblPistol_PatatelName.setText("Пататель")
 
     # ─────────────────────────────────────────────────────────────
     # Отображение текущих значений от МК / эмулятора
@@ -457,3 +521,72 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             "Переключение режима запрещено",
             message,
         )
+
+    def _open_startup_params_dialog(self):
+        """
+        Открывает отдельный диалог параметров запуска.
+        Вся логика отображения вынесена в views/startup_params_dialog.py.
+        """
+        self.startup_vm.set_installation(self.vm.current_install)
+
+        dlg = StartupParamsDialog(self.startup_vm, self)
+        dlg.exec()
+
+    @pyqtSlot(str, bool, str)
+    def _on_error_state_changed(self, install_type: str, has_error: bool, message: str):
+        if install_type != self.vm.current_install:
+            return
+
+        if has_error:
+            self.ledSystemStatus.setProperty("status", "error")
+            self.ledSystemStatus.setStyleSheet(
+                "QLabel#ledSystemStatus { background-color: #EF4444; border-radius: 15px; }"
+            )
+            self.lblSystemStatus.setText(message or "Ошибка установки")
+            self.lblSystemStatus.setStyleSheet("color: #EF4444;")
+        else:
+            self.ledSystemStatus.setProperty("status", "ok")
+            self.ledSystemStatus.setStyleSheet(
+                "QLabel#ledSystemStatus { background-color: #22C55E; border-radius: 15px; }"
+            )
+
+    @pyqtSlot(str, bool)
+    def _on_link_state_changed(self, install_type: str, connected: bool):
+        if install_type != self.vm.current_install:
+            return
+
+        if not connected:
+            self.ledSystemStatus.setStyleSheet(
+                "QLabel#ledSystemStatus { background-color: #EF4444; border-radius: 15px; }"
+            )
+            self.lblSystemStatus.setText("Нет связи с МК")
+            self.lblSystemStatus.setStyleSheet("color: #EF4444;")
+
+    def request_close(self):
+        self.close()
+
+    def closeEvent(self, event):
+        if self.vm.is_any_system_active():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Выход запрещён",
+                "Нельзя закрыть приложение, пока активна система.\n\n"
+                "Сначала остановите систему, выключите зажигание, подачу "
+                "и все активные узлы.",
+            )
+            event.ignore()
+            return
+
+        result = QtWidgets.QMessageBox.question(
+            self,
+            "Подтверждение выхода",
+            "Закрыть приложение?",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+
+        if result == QtWidgets.QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()
