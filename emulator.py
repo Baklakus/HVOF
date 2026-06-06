@@ -1,510 +1,759 @@
 """
-emulator.py — COM-порт эмулятор для HMI HVoF
-============================================
+emulator.py
+
+Чистый Modbus RTU Slave-эмулятор для HMI HVoF.
+
+ВАЖНО:
+- Этот эмулятор НЕ использует pymodbus.
+- Нужен только pyserial.
+- Поэтому он не зависит от изменений API pymodbus 3.13 / 4.0.
 
 Схема для Windows + com0com:
-    main.py    -> COM10
-    emulator   -> COM11
+    HMI main.py  -> COM10
+    emulator.py  -> COM11
 
-Запускать отдельно:
+Установка:
+    python -m pip install pyserial
+
+Запуск:
     python emulator.py
 
-Что делает эмулятор:
-- принимает уставки и команды от HMI;
-- хранит отдельное состояние для ПРОВОЛОКИ и ПОРОШКА;
-- плавно подтягивает текущие значения к уставкам;
-- учитывает включение/выключение системы и узлов;
-- каждые 1 секунду отправляет текущие значения обратно в HMI;
-- позволяет вручную симулировать аварии из консоли.
+Поддерживаемые Modbus-функции:
+    0x03 Read Holding Registers
+    0x04 Read Input Registers
+    0x06 Write Single Register
+    0x10 Write Multiple Registers
+
+Карта регистров:
+    0..4      wire setpoints
+    10..14    powder setpoints
+    20        wire command mask
+    21        powder command mask
+    100..104  wire current values
+    110..114  powder current values
+    120       wire error mask
+    121       powder error mask
+
+Формат значений:
+    float x10 -> uint16
+    35.5 -> 355
 """
+
+from __future__ import annotations
 
 import random
 import struct
 import threading
 import time
+from dataclasses import dataclass, field
 
-import serial
+try:
+    import serial
+except ImportError as exc:
+    print("pyserial не установлен.")
+    print("Установите:")
+    print("    python -m pip install pyserial")
+    raise exc
 
+
+# ─────────────────────────────────────────────────────────────
+# Настройки
+# ─────────────────────────────────────────────────────────────
 
 PORT_NAME = "COM11"
 BAUD_RATE = 115200
-PACKET_LEN = 9
-SEND_PERIOD_SEC = 1.0
-START_BYTE = 0xAA
+SLAVE_ID = 1
 
-INSTALL_WIRE = ord("W")
-INSTALL_POWDER = ord("P")
-INSTALLS = (INSTALL_WIRE, INSTALL_POWDER)
+SERIAL_TIMEOUT_SEC = 0.05
+UPDATE_PERIOD_SEC = 0.25
 
-INSTALL_ALIASES = {
-    "wire": INSTALL_WIRE,
-    "w": INSTALL_WIRE,
-    "проволока": INSTALL_WIRE,
-    "powder": INSTALL_POWDER,
-    "p": INSTALL_POWDER,
-    "порошок": INSTALL_POWDER,
+SCALE = 10.0
+REGISTER_COUNT = 300
+
+# Логи.
+# False — не печатать постоянные READ-запросы от HMI, чтобы не забивать консоль.
+# True  — удобно для низкоуровневой отладки Modbus.
+LOG_READ_REQUESTS = False
+
+# Записи, аварии и важные события лучше оставить видимыми.
+LOG_WRITE_REQUESTS = True
+
+WIRE_SETPOINT_BASE = 0
+POWDER_SETPOINT_BASE = 10
+
+WIRE_COMMAND_REGISTER = 20
+POWDER_COMMAND_REGISTER = 21
+
+WIRE_CURRENT_BASE = 100
+POWDER_CURRENT_BASE = 110
+
+WIRE_ERROR_REGISTER = 120
+POWDER_ERROR_REGISTER = 121
+
+PARAM_NAMES = ("propane", "oxygen", "air", "feeder", "pistol")
+PARAM_COUNT = len(PARAM_NAMES)
+
+COMMAND_BITS = {
+    "main_system": 0,
+    "ignition": 1,
+    "feeding_system": 2,
+    "propane_valve": 3,
+    "oxygen_valve": 4,
+    "air_valve": 5,
+    "feeder_motor": 6,
+    "pistol_motor": 7,
 }
 
-INSTALL_NAMES = {
-    INSTALL_WIRE: "ПРОВОЛОКА",
-    INSTALL_POWDER: "ПОРОШОК",
+PARAM_TO_NODE_BIT = {
+    "propane": COMMAND_BITS["propane_valve"],
+    "oxygen": COMMAND_BITS["oxygen_valve"],
+    "air": COMMAND_BITS["air_valve"],
+    "feeder": COMMAND_BITS["feeder_motor"],
+    "pistol": COMMAND_BITS["pistol_motor"],
 }
 
-PARAM_NAMES = {
-    0x01: "Пропан",
-    0x02: "Кислород",
-    0x03: "Воздух",
-    0x04: "Подача/Q газа",
-    0x05: "Пистолет/Пататель",
-}
-
-CMD_NAMES = {
-    0x10: "СИСТЕМА",
-    0x11: "ЗАЖИГАНИЕ ДУГИ",
-    0x12: "СИСТЕМА ПОДАЧИ",
-    0x20: "Клапан Пропан",
-    0x21: "Клапан Кислород",
-    0x22: "Клапан Воздух",
-    0x23: "Мотор подачи",
-    0x24: "Мотор пистолета/патателя",
-}
-
-PARAM_REQUIRED_CMD = {
-    0x01: 0x20,
-    0x02: 0x21,
-    0x03: 0x22,
-    0x04: 0x23,
-    0x05: 0x24,
-}
-
-ERROR_CODES = {
-    "propane": 0x80,
-    "oxygen": 0x81,
-    "air": 0x82,
-    "feeder": 0x83,
-    "pistol": 0x84,
-    "general": 0x90,
-    "clear": 0x91,
-}
-
-ERROR_NAMES = {
-    0x80: "Авария пропана",
-    0x81: "Авария кислорода",
-    0x82: "Авария воздуха",
-    0x83: "Авария подачи",
-    0x84: "Авария пистолета/патателя",
-    0x90: "Общая авария",
-    0x91: "Сброс аварии",
-}
-
-DEFAULT_TARGETS = {
-    INSTALL_WIRE: {
-        0x01: 35.0,
-        0x02: 120.0,
-        0x03: 250.0,
-        0x04: 80.0,
-        0x05: 60.0,
-    },
-    INSTALL_POWDER: {
-        0x01: 45.0,
-        0x02: 160.0,
-        0x03: 310.0,
-        0x04: 45.0,
-        0x05: 0.0,
-    },
+ERROR_BITS = {
+    "propane": 0,
+    "oxygen": 1,
+    "air": 2,
+    "feeder": 3,
+    "pistol": 4,
+    "general": 5,
 }
 
 
-def crc16(data: bytes) -> int:
+def crc16_modbus(data: bytes) -> int:
     crc = 0xFFFF
-    for b in data:
-        crc ^= b
+
+    for byte in data:
+        crc ^= byte
+
         for _ in range(8):
-            if crc & 1:
+            if crc & 0x0001:
                 crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
-    return crc
+
+    return crc & 0xFFFF
 
 
-def check_crc(pkt: bytes) -> bool:
-    if len(pkt) < 3:
+def append_crc(data: bytes) -> bytes:
+    crc = crc16_modbus(data)
+    # Modbus RTU CRC передаётся little-endian: low byte, high byte.
+    return data + struct.pack("<H", crc)
+
+
+def check_crc(frame: bytes) -> bool:
+    if len(frame) < 4:
         return False
-    return crc16(pkt[:-2]) == struct.unpack(">H", pkt[-2:])[0]
+
+    received = struct.unpack("<H", frame[-2:])[0]
+    calculated = crc16_modbus(frame[:-2])
+
+    return received == calculated
 
 
-def make_packet(inst: int, code: int, value: float) -> bytes:
-    body = struct.pack(">BBBf", START_BYTE, inst, code, float(value))
-    return body + struct.pack(">H", crc16(body))
+def to_reg(value: float) -> int:
+    raw = int(round(float(value) * SCALE))
+    return max(0, min(0xFFFF, raw))
 
 
-def packet_to_hex(packet: bytes) -> str:
-    return " ".join(f"{b:02X}" for b in packet)
+def from_reg(value: int) -> float:
+    return int(value) / SCALE
 
 
-class EmulatorState:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.targets = {inst: values.copy() for inst, values in DEFAULT_TARGETS.items()}
-        self.current = {
-            inst: {param: 0.0 for param in values}
-            for inst, values in DEFAULT_TARGETS.items()
-        }
-        self.commands = {
-            inst: {
-                0x10: False,
-                0x11: False,
-                0x12: False,
-                0x20: False,
-                0x21: False,
-                0x22: False,
-                0x23: False,
-                0x24: False,
-            }
-            for inst in INSTALLS
-        }
-        self.active_faults = {inst: set() for inst in INSTALLS}
-        self.telemetry_enabled = True
-
-    def set_target(self, inst: int, param: int, value: float):
-        with self.lock:
-            if inst in self.targets and param in self.targets[inst]:
-                self.targets[inst][param] = float(value)
-
-    def set_command(self, inst: int, cmd: int, state: bool):
-        with self.lock:
-            if inst in self.commands:
-                self.commands[inst][cmd] = bool(state)
-                if cmd == 0x10 and not state:
-                    for code in self.commands[inst]:
-                        self.commands[inst][code] = False
-
-    def set_fault(self, inst: int, fault_name: str, active: bool):
-        with self.lock:
-            if inst not in self.active_faults:
-                return
-            if active:
-                self.active_faults[inst].add(fault_name)
-            else:
-                self.active_faults[inst].discard(fault_name)
-
-    def clear_faults(self, inst: int | None = None):
-        with self.lock:
-            if inst is None:
-                for key in self.active_faults:
-                    self.active_faults[key].clear()
-            elif inst in self.active_faults:
-                self.active_faults[inst].clear()
-
-    def set_telemetry(self, enabled: bool):
-        with self.lock:
-            self.telemetry_enabled = bool(enabled)
-
-    def is_telemetry_enabled(self) -> bool:
-        with self.lock:
-            return self.telemetry_enabled
-
-    def tick_current_values(self):
-        with self.lock:
-            for inst in INSTALLS:
-                system_on = self.commands[inst].get(0x10, False)
-                for param, target in self.targets[inst].items():
-                    required_cmd = PARAM_REQUIRED_CMD.get(param)
-                    node_on = self.commands[inst].get(required_cmd, False)
-                    effective_target = target if system_on and node_on else 0.0
-                    cur = self.current[inst][param]
-                    delta = effective_target - cur
-                    cur += delta * 0.25
-                    if effective_target > 0:
-                        cur += random.uniform(-0.15, 0.15)
-                    if cur < 0:
-                        cur = 0.0
-                    self.current[inst][param] = cur
-
-    def snapshot_current(self):
-        with self.lock:
-            return {inst: values.copy() for inst, values in self.current.items()}
-
-    def snapshot_status(self):
-        with self.lock:
-            return {
-                "targets": {inst: values.copy() for inst, values in self.targets.items()},
-                "current": {inst: values.copy() for inst, values in self.current.items()},
-                "commands": {inst: values.copy() for inst, values in self.commands.items()},
-                "faults": {inst: set(values) for inst, values in self.active_faults.items()},
-                "telemetry_enabled": self.telemetry_enabled,
-            }
+def words_to_bytes(values: list[int]) -> bytes:
+    return b"".join(struct.pack(">H", int(value) & 0xFFFF) for value in values)
 
 
-def decode_and_apply_packet(raw: bytes, state: EmulatorState) -> str:
-    hex_str = packet_to_hex(raw)
-    if len(raw) != PACKET_LEN:
-        return f"  [!] Неверная длина {len(raw)} байт | {hex_str}"
-    if raw[0] != START_BYTE:
-        return f"  [!] Нет старт-байта 0xAA | {hex_str}"
-    if not check_crc(raw):
-        return f"  [!] ОШИБКА CRC | {hex_str}"
-
-    inst = raw[1]
-    code = raw[2]
-    value = struct.unpack(">f", raw[3:7])[0]
-    inst_name = INSTALL_NAMES.get(inst, f"0x{inst:02X}")
-
-    if code in PARAM_NAMES:
-        state.set_target(inst, code, value)
-        return (
-            f"  [OK] УСТАВКА  | {inst_name:10s} | "
-            f"{PARAM_NAMES[code]:24s} | цель = {value:8.2f}"
-        )
-
-    if code in CMD_NAMES:
-        enabled = value >= 1.0
-        state.set_command(inst, code, enabled)
-        return (
-            f"  [OK] КОМАНДА  | {inst_name:10s} | "
-            f"{CMD_NAMES[code]:24s} | {'ВКЛ' if enabled else 'ВЫКЛ'}"
-        )
-
-    return f"  [?] Неизвестный код 0x{code:02X} | val={value:.2f} | {hex_str}"
-
-
-def receiver_loop(port: serial.Serial, state: EmulatorState, stop: threading.Event):
-    buf = bytearray()
-    print(f"  Слушаю {port.name} @ {port.baudrate} baud...\n")
-
-    while not stop.is_set():
-        try:
-            chunk = port.read(port.in_waiting or 1)
-        except serial.SerialException as e:
-            print(f"  [!] Ошибка порта: {e}")
-            break
-        if not chunk:
-            continue
-        buf.extend(chunk)
-        while True:
-            idx = buf.find(START_BYTE)
-            if idx == -1:
-                buf.clear()
-                break
-            if idx > 0:
-                print(f"  [~] Пропуск {idx} мусорных байт")
-                del buf[:idx]
-            if len(buf) < PACKET_LEN:
-                break
-            pkt = bytes(buf[:PACKET_LEN])
-            del buf[:PACKET_LEN]
-            print(decode_and_apply_packet(pkt, state), flush=True)
-
-
-def telemetry_loop(port: serial.Serial, state: EmulatorState, stop: threading.Event):
-    print(f"  Передача текущих параметров: период {SEND_PERIOD_SEC:.1f} сек\n")
-
-    while not stop.is_set():
-        if not state.is_telemetry_enabled():
-            time.sleep(SEND_PERIOD_SEC)
-            continue
-        state.tick_current_values()
-        snapshot = state.snapshot_current()
-        for inst in INSTALLS:
-            for param, value in snapshot[inst].items():
-                pkt = make_packet(inst, param, value)
-                try:
-                    port.write(pkt)
-                except serial.SerialException as e:
-                    print(f"  [!] Ошибка отправки телеметрии: {e}")
-                    return
-        time.sleep(SEND_PERIOD_SEC)
-
-
-def parse_install(text: str) -> int | None:
-    return INSTALL_ALIASES.get(text.strip().lower())
-
-
-def send_fault(port: serial.Serial, state: EmulatorState, inst: int, fault_name: str, active: bool = True):
-    if fault_name not in ERROR_CODES or fault_name == "clear":
-        print(f"  [!] Неизвестная авария: {fault_name}")
-        print("      Доступно: propane, oxygen, air, feeder, pistol, general")
-        return
-    code = ERROR_CODES[fault_name]
-    pkt = make_packet(inst, code, 1.0 if active else 0.0)
-    try:
-        port.write(pkt)
-    except serial.SerialException as e:
-        print(f"  [!] Не удалось отправить аварию: {e}")
-        return
-    state.set_fault(inst, fault_name, active)
-    print(
-        f"  [TX] АВАРИЯ | {INSTALL_NAMES[inst]:10s} | "
-        f"{ERROR_NAMES[code]} | {'ON' if active else 'OFF'} | {packet_to_hex(pkt)}"
+@dataclass
+class InstallRuntime:
+    name: str
+    setpoint_base: int
+    command_register: int
+    current_base: int
+    error_register: int
+    currents: dict[str, float] = field(
+        default_factory=lambda: {name: 0.0 for name in PARAM_NAMES}
     )
 
 
-def send_fault_clear(port: serial.Serial, state: EmulatorState, inst: int | None = None):
-    installs = INSTALLS if inst is None else (inst,)
-    for current_inst in installs:
-        pkt = make_packet(current_inst, ERROR_CODES["clear"], 1.0)
+class PureModbusSlaveEmulator:
+    def __init__(self):
+        self.running = True
+        self.lock = threading.RLock()
+
+        self.holding_registers = [0] * REGISTER_COUNT
+        self.input_registers = [0] * REGISTER_COUNT
+
+        self.installs = {
+            "wire": InstallRuntime(
+                name="wire",
+                setpoint_base=WIRE_SETPOINT_BASE,
+                command_register=WIRE_COMMAND_REGISTER,
+                current_base=WIRE_CURRENT_BASE,
+                error_register=WIRE_ERROR_REGISTER,
+            ),
+            "powder": InstallRuntime(
+                name="powder",
+                setpoint_base=POWDER_SETPOINT_BASE,
+                command_register=POWDER_COMMAND_REGISTER,
+                current_base=POWDER_CURRENT_BASE,
+                error_register=POWDER_ERROR_REGISTER,
+            ),
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    # Регистры
+    # ─────────────────────────────────────────────────────────────
+
+    def read_holding(self, address: int, count: int) -> list[int]:
+        with self.lock:
+            self._validate_range(address, count)
+            return list(self.holding_registers[address:address + count])
+
+    def read_input(self, address: int, count: int) -> list[int]:
+        with self.lock:
+            self._validate_range(address, count)
+            return list(self.input_registers[address:address + count])
+
+    def write_holding(self, address: int, values: list[int]):
+        with self.lock:
+            self._validate_range(address, len(values))
+
+            for index, value in enumerate(values):
+                raw = int(value) & 0xFFFF
+                self.holding_registers[address + index] = raw
+
+                # Дублируем в input registers, чтобы HMI мог читать значения
+                # функцией 03 или 04.
+                self.input_registers[address + index] = raw
+
+    def _validate_range(self, address: int, count: int):
+        if address < 0 or count < 1 or address + count > REGISTER_COUNT:
+            raise ValueError(f"Недопустимый диапазон регистров: address={address}, count={count}")
+
+    # ─────────────────────────────────────────────────────────────
+    # Модель установки
+    # ─────────────────────────────────────────────────────────────
+
+    def update_loop(self):
+        while self.running:
+            try:
+                for install in self.installs.values():
+                    self.update_install(install)
+            except Exception as exc:
+                print("[EMU] update error:", exc)
+
+            time.sleep(UPDATE_PERIOD_SEC)
+
+    def update_install(self, install: InstallRuntime):
+        setpoint_regs = self.read_holding(install.setpoint_base, PARAM_COUNT)
+        command_mask = self.read_holding(install.command_register, 1)[0]
+        error_mask = self.read_holding(install.error_register, 1)[0]
+
+        system_on = bool(command_mask & (1 << COMMAND_BITS["main_system"]))
+        general_fault = bool(error_mask & (1 << ERROR_BITS["general"]))
+
+        current_regs = []
+
+        for index, param_name in enumerate(PARAM_NAMES):
+            target = from_reg(setpoint_regs[index])
+
+            node_bit = PARAM_TO_NODE_BIT[param_name]
+            node_on = bool(command_mask & (1 << node_bit))
+
+            param_fault = bool(error_mask & (1 << ERROR_BITS[param_name]))
+
+            if system_on and node_on and not general_fault and not param_fault:
+                effective_target = target
+            else:
+                effective_target = 0.0
+
+            current = install.currents[param_name]
+            current += (effective_target - current) * 0.20
+
+            if effective_target > 0.0:
+                current += random.uniform(-0.12, 0.12)
+
+            if current < 0.03:
+                current = 0.0
+
+            install.currents[param_name] = current
+            current_regs.append(to_reg(current))
+
+        self.write_holding(install.current_base, current_regs)
+
+    # ─────────────────────────────────────────────────────────────
+    # Modbus RTU serial loop
+    # ─────────────────────────────────────────────────────────────
+
+    def serial_loop(self):
         try:
-            port.write(pkt)
-        except serial.SerialException as e:
-            print(f"  [!] Не удалось отправить сброс аварии: {e}")
+            port = serial.Serial(
+                port=PORT_NAME,
+                baudrate=BAUD_RATE,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=SERIAL_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            print(f"[EMU] Не удалось открыть {PORT_NAME}: {exc}")
+            self.running = False
             return
-        print(f"  [TX] СБРОС АВАРИИ | {INSTALL_NAMES[current_inst]:10s} | {packet_to_hex(pkt)}")
-    state.clear_faults(inst)
 
+        print(f"[EMU] Serial открыт: {PORT_NAME} @ {BAUD_RATE}")
 
-def print_status(state: EmulatorState):
-    snapshot = state.snapshot_status()
-    print("\n" + "-" * 72)
-    print(f"  Телеметрия: {'ON' if snapshot['telemetry_enabled'] else 'OFF'}")
-    for inst in INSTALLS:
-        print(f"\n  {INSTALL_NAMES[inst]}")
-        commands = snapshot["commands"][inst]
-        faults = snapshot["faults"][inst]
-        print("  Команды:")
-        for code, title in CMD_NAMES.items():
-            print(f"    {title:24s}: {'ON' if commands.get(code, False) else 'OFF'}")
-        print("  Значения:")
-        for param, title in PARAM_NAMES.items():
-            target = snapshot["targets"][inst][param]
-            current = snapshot["current"][inst][param]
-            print(f"    {title:24s}: current={current:8.2f} target={target:8.2f}")
-        print("  Аварии:")
-        if faults:
-            for fault in sorted(faults):
-                print(f"    {fault}")
-        else:
-            print("    нет")
-    print("-" * 72 + "\n")
+        rx = bytearray()
+
+        try:
+            while self.running:
+                chunk = port.read(port.in_waiting or 1)
+
+                if chunk:
+                    rx.extend(chunk)
+
+                    while True:
+                        frame = self._try_extract_frame(rx)
+                        if frame is None:
+                            break
+
+                        response = self.handle_frame(frame)
+
+                        if response:
+                            port.write(response)
+
+                elif len(rx) > 260:
+                    rx.clear()
+
+        except KeyboardInterrupt:
+            pass
+        except Exception as exc:
+            print("[EMU] serial error:", exc)
+        finally:
+            try:
+                port.close()
+            except Exception:
+                pass
+
+            self.running = False
+            print("[EMU] Serial закрыт")
+
+    def _try_extract_frame(self, rx: bytearray) -> bytes | None:
+        """
+        Извлекает один Modbus RTU request из буфера.
+        Поддерживаем функции 03, 04, 06, 10.
+        """
+        while rx and rx[0] != SLAVE_ID:
+            del rx[0]
+
+        if len(rx) < 2:
+            return None
+
+        func = rx[1]
+
+        # 03/04/06 запросы фиксированной длины 8 байт.
+        if func in (0x03, 0x04, 0x06):
+            expected_len = 8
+
+            if len(rx) < expected_len:
+                return None
+
+            frame = bytes(rx[:expected_len])
+            del rx[:expected_len]
+            return frame
+
+        # 10 Write Multiple Registers:
+        # slave + func + address(2) + count(2) + byte_count(1) + data + crc(2)
+        if func == 0x10:
+            if len(rx) < 7:
+                return None
+
+            byte_count = rx[6]
+            expected_len = 7 + byte_count + 2
+
+            if len(rx) < expected_len:
+                return None
+
+            frame = bytes(rx[:expected_len])
+            del rx[:expected_len]
+            return frame
+
+        # Неизвестная функция. Удаляем первый байт, чтобы не зависнуть.
+        del rx[0]
+        return None
+
+    def handle_frame(self, frame: bytes) -> bytes | None:
+        if not check_crc(frame):
+            print("[EMU RX] CRC error:", frame.hex(" ").upper())
+            return None
+
+        slave = frame[0]
+        func = frame[1]
+
+        if slave != SLAVE_ID:
+            return None
+
+        try:
+            if func == 0x03:
+                return self.handle_read_registers(frame, input_registers=False)
+
+            if func == 0x04:
+                return self.handle_read_registers(frame, input_registers=True)
+
+            if func == 0x06:
+                return self.handle_write_single(frame)
+
+            if func == 0x10:
+                return self.handle_write_multiple(frame)
+
+            return self.exception_response(func, 0x01)
+
+        except Exception as exc:
+            print("[EMU] handle error:", exc)
+            return self.exception_response(func, 0x04)
+
+    def handle_read_registers(self, frame: bytes, input_registers: bool) -> bytes:
+        _, func, address, count = struct.unpack(">BBHH", frame[:6])
+
+        if count < 1 or count > 125:
+            return self.exception_response(func, 0x03)
+
+        try:
+            values = self.read_input(address, count) if input_registers else self.read_holding(address, count)
+        except ValueError:
+            return self.exception_response(func, 0x02)
+
+        payload = bytes([SLAVE_ID, func, count * 2]) + words_to_bytes(values)
+        response = append_crc(payload)
+
+        if LOG_READ_REQUESTS:
+            print(f"[EMU RX] READ {'IR' if input_registers else 'HR'} addr={address} count={count}")
+
+        return response
+
+    def handle_write_single(self, frame: bytes) -> bytes:
+        _, func, address, value = struct.unpack(">BBHH", frame[:6])
+
+        try:
+            self.write_holding(address, [value])
+        except ValueError:
+            return self.exception_response(func, 0x02)
+
+        if LOG_WRITE_REQUESTS:
+            print(f"[EMU RX] WRITE HR addr={address} value={value}")
+
+        # Для функции 06 ответ = эхо запроса.
+        return append_crc(frame[:-2])
+
+    def handle_write_multiple(self, frame: bytes) -> bytes:
+        slave = frame[0]
+        func = frame[1]
+        address = struct.unpack(">H", frame[2:4])[0]
+        count = struct.unpack(">H", frame[4:6])[0]
+        byte_count = frame[6]
+
+        if count < 1 or count > 123 or byte_count != count * 2:
+            return self.exception_response(func, 0x03)
+
+        values = []
+
+        offset = 7
+        for _ in range(count):
+            values.append(struct.unpack(">H", frame[offset:offset + 2])[0])
+            offset += 2
+
+        try:
+            self.write_holding(address, values)
+        except ValueError:
+            return self.exception_response(func, 0x02)
+
+        if LOG_WRITE_REQUESTS:
+            print(f"[EMU RX] WRITE MULTI HR addr={address} count={count} values={values}")
+
+        payload = struct.pack(">BBHH", slave, func, address, count)
+        return append_crc(payload)
+
+    def exception_response(self, func: int, code: int) -> bytes:
+        payload = bytes([SLAVE_ID, func | 0x80, code])
+        return append_crc(payload)
+
+    # ─────────────────────────────────────────────────────────────
+    # Консоль
+    # ─────────────────────────────────────────────────────────────
+
+    def console_loop(self):
+        print_help()
+
+        while self.running:
+            try:
+                line = input("modbus-emu> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                self.running = False
+                break
+
+            if not line:
+                continue
+
+            parts = line.split()
+            command = parts[0].lower()
+
+            try:
+                if command in ("q", "quit", "exit"):
+                    self.running = False
+                    break
+
+                if command in ("h", "help", "?"):
+                    print_help()
+                    continue
+
+                if command == "status":
+                    self.print_status()
+                    continue
+
+                if command == "log":
+                    self.cmd_log(parts)
+                    continue
+
+                if command == "fault":
+                    self.cmd_fault(parts)
+                    continue
+
+                if command == "clear":
+                    self.cmd_clear(parts)
+                    continue
+
+                if command == "set":
+                    self.cmd_set(parts)
+                    continue
+
+                if command == "cmd":
+                    self.cmd_command_mask(parts)
+                    continue
+
+                print("Неизвестная команда. Напишите help.")
+
+            except Exception as exc:
+                print("[EMU] command error:", exc)
+
+    def cmd_log(self, parts: list[str]):
+        """
+        Управление логами:
+            log read on
+            log read off
+            log write on
+            log write off
+        """
+        global LOG_READ_REQUESTS, LOG_WRITE_REQUESTS
+
+        if len(parts) != 3:
+            print("Использование: log read on | log read off | log write on | log write off")
+            return
+
+        target = parts[1].lower()
+        state = parts[2].lower()
+
+        if state not in ("on", "off"):
+            print("Состояние должно быть on или off.")
+            return
+
+        enabled = state == "on"
+
+        if target == "read":
+            LOG_READ_REQUESTS = enabled
+            print(f"[EMU] READ logs: {'ON' if enabled else 'OFF'}")
+            return
+
+        if target == "write":
+            LOG_WRITE_REQUESTS = enabled
+            print(f"[EMU] WRITE logs: {'ON' if enabled else 'OFF'}")
+            return
+
+        print("Тип логов должен быть read или write.")
+
+    def cmd_fault(self, parts: list[str]):
+        if len(parts) != 3:
+            print("Использование: fault wire propane")
+            return
+
+        install_name = parts[1].lower()
+        fault_name = parts[2].lower()
+
+        install = self.installs.get(install_name)
+        if install is None:
+            print("Установка должна быть wire или powder.")
+            return
+
+        bit = ERROR_BITS.get(fault_name)
+        if bit is None:
+            print("Авария должна быть: propane, oxygen, air, feeder, pistol, general.")
+            return
+
+        mask = self.read_holding(install.error_register, 1)[0]
+        mask |= 1 << bit
+        self.write_holding(install.error_register, [mask])
+
+        print(f"[EMU] fault {install_name} {fault_name}: error_mask=0x{mask:04X}")
+
+    def cmd_clear(self, parts: list[str]):
+        if len(parts) != 2:
+            print("Использование: clear wire | clear powder | clear all")
+            return
+
+        target = parts[1].lower()
+
+        if target == "all":
+            for install in self.installs.values():
+                self.write_holding(install.error_register, [0])
+            print("[EMU] Все аварии сброшены.")
+            return
+
+        install = self.installs.get(target)
+        if install is None:
+            print("Установка должна быть wire, powder или all.")
+            return
+
+        self.write_holding(install.error_register, [0])
+        print(f"[EMU] Аварии сброшены: {target}")
+
+    def cmd_set(self, parts: list[str]):
+        if len(parts) != 4:
+            print("Использование: set wire propane 35.5")
+            return
+
+        install_name = parts[1].lower()
+        param_name = parts[2].lower()
+        value = float(parts[3].replace(",", "."))
+
+        install = self.installs.get(install_name)
+        if install is None:
+            print("Установка должна быть wire или powder.")
+            return
+
+        if param_name not in PARAM_NAMES:
+            print("Параметр должен быть: propane, oxygen, air, feeder, pistol.")
+            return
+
+        index = PARAM_NAMES.index(param_name)
+        address = install.setpoint_base + index
+        raw = to_reg(value)
+
+        self.write_holding(address, [raw])
+
+        print(f"[EMU] set {install_name} {param_name}={value:.2f} -> reg={address} raw={raw}")
+
+    def cmd_command_mask(self, parts: list[str]):
+        """
+        Ручная установка командной маски:
+            cmd wire 0039
+            cmd powder 0
+        """
+        if len(parts) != 3:
+            print("Использование: cmd wire 0039 | cmd powder 0")
+            return
+
+        install_name = parts[1].lower()
+        raw_mask = parts[2].lower().replace("0x", "")
+
+        install = self.installs.get(install_name)
+        if install is None:
+            print("Установка должна быть wire или powder.")
+            return
+
+        try:
+            mask = int(raw_mask, 16)
+        except ValueError:
+            mask = int(raw_mask)
+
+        self.write_holding(install.command_register, [mask])
+        print(f"[EMU] command mask {install_name}: 0x{mask:04X}")
+
+    def print_status(self):
+        print()
+        print("=" * 72)
+        print("STATUS")
+        print("=" * 72)
+
+        for install_name, install in self.installs.items():
+            setpoints = self.read_holding(install.setpoint_base, PARAM_COUNT)
+            currents = self.read_holding(install.current_base, PARAM_COUNT)
+            command_mask = self.read_holding(install.command_register, 1)[0]
+            error_mask = self.read_holding(install.error_register, 1)[0]
+
+            print()
+            print(install_name.upper())
+            print(f"  setpoint regs: {install.setpoint_base}..{install.setpoint_base + PARAM_COUNT - 1}")
+            print(f"  current regs:  {install.current_base}..{install.current_base + PARAM_COUNT - 1}")
+            print(f"  command reg:   {install.command_register}, mask=0x{command_mask:04X}")
+            print(f"  error reg:     {install.error_register}, mask=0x{error_mask:04X}")
+            print()
+
+            for name, sp_reg, cur_reg in zip(PARAM_NAMES, setpoints, currents):
+                print(
+                    f"  {name:8s} | setpoint={from_reg(sp_reg):8.2f} "
+                    f"| current={from_reg(cur_reg):8.2f}"
+                )
+
+        print()
 
 
 def print_help():
     print(
         """
 Команды эмулятора:
-  help                         показать справку
-  status                       показать состояние эмулятора
 
-  fault wire propane           отправить аварию пропана для ПРОВОЛОКИ
-  fault powder oxygen          отправить аварию кислорода для ПОРОШКА
-  fault wire air               отправить аварию воздуха
-  fault wire feeder            отправить аварию подачи
-  fault wire pistol            отправить аварию пистолета/патателя
-  fault wire general           отправить общую аварию
+  help
+  status
 
-  clear wire                   сбросить аварию для ПРОВОЛОКИ
-  clear powder                 сбросить аварию для ПОРОШКА
-  clear all                    сбросить аварии для обеих установок
+  log read on
+  log read off
+  log write on
+  log write off
 
-  telemetry on                 включить телеметрию
-  telemetry off                выключить телеметрию для проверки потери связи
+  fault wire propane
+  fault wire oxygen
+  fault wire air
+  fault wire feeder
+  fault wire pistol
+  fault wire general
 
-  quit                         выход
+  fault powder propane
+  fault powder oxygen
+  fault powder air
+  fault powder feeder
+  fault powder pistol
+  fault powder general
+
+  clear wire
+  clear powder
+  clear all
+
+  set wire propane 35.5
+  set powder oxygen 120
+
+  cmd wire 0039
+  cmd powder 0
+
+  quit
 """
     )
 
 
-def console_loop(port: serial.Serial, state: EmulatorState, stop: threading.Event):
-    print_help()
-    while not stop.is_set():
-        try:
-            line = input("emu> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            stop.set()
-            break
-        if not line:
-            continue
-        parts = line.split()
-        cmd = parts[0].lower()
-
-        if cmd in ("q", "quit", "exit"):
-            stop.set()
-            break
-        if cmd in ("h", "help", "?"):
-            print_help()
-            continue
-        if cmd == "status":
-            print_status(state)
-            continue
-        if cmd == "telemetry":
-            if len(parts) != 2 or parts[1].lower() not in ("on", "off"):
-                print("  [!] Использование: telemetry on | telemetry off")
-                continue
-            enabled = parts[1].lower() == "on"
-            state.set_telemetry(enabled)
-            print(f"  [OK] Телеметрия {'включена' if enabled else 'выключена'}")
-            continue
-        if cmd == "fault":
-            if len(parts) != 3:
-                print("  [!] Использование: fault wire propane")
-                continue
-            inst = parse_install(parts[1])
-            fault_name = parts[2].lower()
-            if inst is None:
-                print("  [!] Установка должна быть wire или powder")
-                continue
-            send_fault(port, state, inst, fault_name, True)
-            continue
-        if cmd == "clear":
-            if len(parts) != 2:
-                print("  [!] Использование: clear wire | clear powder | clear all")
-                continue
-            target = parts[1].lower()
-            if target == "all":
-                send_fault_clear(port, state, None)
-                continue
-            inst = parse_install(target)
-            if inst is None:
-                print("  [!] Установка должна быть wire, powder или all")
-                continue
-            send_fault_clear(port, state, inst)
-            continue
-        print("  [!] Неизвестная команда. Напишите help.")
-
-
 def main():
     print("=" * 72)
-    print("  HVoF UART Эмулятор с телеметрией и симуляцией аварий")
-    print(f"  Порт: {PORT_NAME} | Baud: {BAUD_RATE}")
-    print("  Ctrl+C или quit — выход")
+    print("HVoF Pure Modbus RTU Slave Emulator")
+    print(f"PORT={PORT_NAME} | BAUD={BAUD_RATE} | SLAVE_ID={SLAVE_ID}")
+    print("Backend: pyserial only, no pymodbus")
+    print(f"READ logs: {'ON' if LOG_READ_REQUESTS else 'OFF'} | WRITE logs: {'ON' if LOG_WRITE_REQUESTS else 'OFF'}")
     print("=" * 72)
 
-    try:
-        port = serial.Serial(
-            port=PORT_NAME,
-            baudrate=BAUD_RATE,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=0.1,
-        )
-    except serial.SerialException as e:
-        print(f"\n  [ОШИБКА] Не удалось открыть {PORT_NAME}: {e}")
-        print("\n  Проверь:")
-        print("  1. com0com установлен и пара COM10/COM11 создана")
-        print("  2. Порт не занят другой программой")
-        print("  3. В диспетчере устройств виден COM11")
-        return
+    emulator = PureModbusSlaveEmulator()
 
-    print(f"\n  Порт {PORT_NAME} открыт успешно. Жду пакетов от main.py...\n")
-    state = EmulatorState()
-    stop = threading.Event()
-    threads = [
-        threading.Thread(target=receiver_loop, args=(port, state, stop), daemon=True),
-        threading.Thread(target=telemetry_loop, args=(port, state, stop), daemon=True),
-        threading.Thread(target=console_loop, args=(port, state, stop), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
-    try:
-        while not stop.is_set():
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        print("\n  Завершение...")
-    finally:
-        stop.set()
-        time.sleep(0.2)
-        port.close()
-        print("  Порт закрыт")
+    threading.Thread(target=emulator.update_loop, daemon=True).start()
+    threading.Thread(target=emulator.console_loop, daemon=True).start()
+
+    emulator.serial_loop()
 
 
 if __name__ == "__main__":

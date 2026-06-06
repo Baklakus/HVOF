@@ -29,6 +29,16 @@
       "air": 0.0,
       "feeder_speed": 90.0,
       "pistol_speed": 0.0
+    },
+    {
+      "material": "Проволока 4",
+      "diameter": 1.6,
+      "gas_ratio": "30/100/220",
+      "propane": 30.0,
+      "oxygen": 100.0,
+      "air": 220.0,
+      "feeder_speed": 70.0,
+      "pistol_speed": 60.0
     }
   ],
   "powder": [
